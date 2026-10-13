@@ -1,0 +1,266 @@
+#include <LiquidCrystal.h>
+
+LiquidCrystal lcd(12, 11, A5, A4, A3, A2);
+
+#define pushButton 2
+#define leftLed 3
+#define rightLed 4
+
+#define doorLockMotor1 7
+#define doorLockMotor2 8
+#define enableDoorLockMotor 9
+
+#define windowMotor1 6
+#define windowMotor2 10
+#define enableWindowMotor 5
+
+#define securedMode 0
+#define unlockedMode 1
+#define lockedMode 2
+#define double_lockedMode 3
+
+#define TASK_INTERVAL 20
+
+int currentMode = securedMode;
+int previousMode = -1;
+
+bool pendingModeChange = false;
+int targetMode = -1;
+int blinkCount = 0;
+
+
+unsigned long blinkPrevTime = 0;
+int blinkStep = 0;
+int blinkTotal = 0;
+bool isBlinking = false;
+
+
+unsigned long motorStartTime = 0;
+unsigned long motorDuration = 0;
+bool isRunningMotor = false;
+
+int blinkState = 0; 
+
+void setup() {
+  pinMode(pushButton, INPUT);
+  pinMode(leftLed, OUTPUT);
+  pinMode(rightLed, OUTPUT);
+
+  pinMode(doorLockMotor1, OUTPUT);
+  pinMode(doorLockMotor2, OUTPUT);
+  pinMode(enableDoorLockMotor, OUTPUT);
+
+  pinMode(windowMotor1, OUTPUT);
+  pinMode(windowMotor2, OUTPUT);
+  pinMode(enableWindowMotor, OUTPUT);
+
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Mode: SECURED");
+  updateButtonStateOnLCD();
+}
+
+void loop() {
+  static unsigned long ts_prev_task = 0;
+  unsigned long ts_now_task = millis();
+
+  if (ts_now_task - ts_prev_task >= TASK_INTERVAL) {
+    ts_prev_task = ts_now_task;
+    Task20ms();
+  }
+}
+
+void Task20ms() {
+  handleButton();
+  updateBlinking();
+  updateMotors();
+
+  if (pendingModeChange && !isRunningMotor && !isBlinking) {
+    updateModeOnLCD(targetMode);
+    startActuatorsTransition(currentMode, targetMode);
+    currentMode = targetMode;
+    pendingModeChange = false;
+    previousMode = currentMode;
+  }
+
+  if (currentMode != previousMode) {
+    updateModeOnLCD(currentMode);
+    previousMode = currentMode;
+  }
+
+  updateButtonStateOnLCD();
+}
+
+
+void handleButton() {
+  static int lastButtonState = LOW;
+  static bool buttonPressed = false;
+  static unsigned long buttonPressStart = 0;
+  static bool actionTaken = false;
+
+  int buttonState = digitalRead(pushButton);
+
+  if (buttonState == HIGH && lastButtonState == LOW) {
+    buttonPressed = true;
+    buttonPressStart = millis();
+    actionTaken = false;
+  }
+
+  if (buttonState == HIGH && buttonPressed) {
+    unsigned long pressDuration = millis() - buttonPressStart;
+
+    if (!actionTaken) {
+      if ((currentMode == securedMode || currentMode == lockedMode || currentMode == double_lockedMode) && pressDuration >= 800) {
+        targetMode = unlockedMode;
+        blinkCount = 2;
+        pendingModeChange = true;
+        actionTaken = true;
+      }
+    }
+  }
+
+  if (buttonState == LOW && lastButtonState == HIGH) {
+    buttonPressed = false;
+    unsigned long pressDuration = millis() - buttonPressStart;
+
+    if (actionTaken) {
+      actionTaken = false;
+      lastButtonState = buttonState;
+      return;
+    }
+
+    if (currentMode == unlockedMode && pressDuration >= 800) {
+      targetMode = lockedMode;
+      blinkCount = 1;
+      pendingModeChange = true;
+    } else if (currentMode == lockedMode && pressDuration >= 100 && pressDuration < 800) {
+      targetMode = double_lockedMode;
+      blinkCount = 3;
+      pendingModeChange = true;
+    }
+  }
+
+  lastButtonState = buttonState;
+}
+
+
+void updateModeOnLCD(int mode) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Mode: ");
+  switch (mode) {
+    case securedMode: 
+    lcd.print("SECURED"); break;
+    case unlockedMode: 
+    lcd.print("UNLOCKED"); break;
+    case lockedMode: 
+    lcd.print("LOCKED"); break;
+    case double_lockedMode: 
+    lcd.print("DBL-LOCKED"); break;
+  }
+}
+
+void updateButtonStateOnLCD() {
+  lcd.setCursor(0, 1);
+  lcd.print("BTN: ");
+  if (digitalRead(pushButton) == HIGH) {
+    lcd.print("PRESSED ");
+  } else {
+    lcd.print("RELEASED");
+  }
+}
+
+
+void startActuatorsTransition(int fromMode, int toMode) {
+  if (toMode == lockedMode) {
+    startDoorMotorCW();
+    motorDuration = 1000;
+  } else if (toMode == double_lockedMode) {
+    startDoorMotorCW();
+    startWindowMotorCCW();
+    motorDuration = 3000;
+  } else if (toMode == unlockedMode) {
+    if (fromMode == lockedMode) {
+      startDoorMotorCCW();
+      motorDuration = 1000;
+    } else if (fromMode == double_lockedMode) {
+      startDoorMotorCCW();
+      startWindowMotorCW();
+      motorDuration = 3000;
+    }
+  }
+
+  startBlinking(blinkCount);
+  motorStartTime = millis();
+  isRunningMotor = true;
+}
+
+void updateMotors() {
+  if (isRunningMotor && millis() - motorStartTime >= motorDuration) {
+    stopAllMotors();
+    isRunningMotor = false;
+  }
+}
+
+void startBlinking(int times) {
+  blinkTotal = times * 2;
+  blinkStep = 0;
+  blinkPrevTime = millis();
+  isBlinking = true;
+  blinkState = 0;
+  digitalWrite(leftLed, LOW);
+  digitalWrite(rightLed, LOW);
+}
+
+void updateBlinking() {
+  if (!isBlinking) return;
+
+  unsigned long now = millis();
+  unsigned long interval = (blinkState == 0) ? 300 : 700;
+
+  if (now - blinkPrevTime >= interval) {
+    blinkPrevTime = now;
+    blinkState = 1 - blinkState;
+
+    digitalWrite(leftLed, blinkState);
+    digitalWrite(rightLed, blinkState);
+    blinkStep++;
+
+    if (blinkStep >= blinkTotal) {
+      isBlinking = false;
+      digitalWrite(leftLed, LOW);
+      digitalWrite(rightLed, LOW);
+    }
+  }
+}
+
+
+void startDoorMotorCW() {
+  digitalWrite(doorLockMotor1, HIGH);
+  digitalWrite(doorLockMotor2, LOW);
+  digitalWrite(enableDoorLockMotor, HIGH);
+}
+
+void startDoorMotorCCW() {
+  digitalWrite(doorLockMotor1, LOW);
+  digitalWrite(doorLockMotor2, HIGH);
+  digitalWrite(enableDoorLockMotor, HIGH);
+}
+
+void startWindowMotorCW() {
+  digitalWrite(windowMotor1, HIGH);
+  digitalWrite(windowMotor2, LOW);
+  digitalWrite(enableWindowMotor, HIGH);
+}
+
+void startWindowMotorCCW() {
+  digitalWrite(windowMotor1, LOW);
+  digitalWrite(windowMotor2, HIGH);
+  digitalWrite(enableWindowMotor, HIGH);
+}
+
+void stopAllMotors() {
+  digitalWrite(enableDoorLockMotor, LOW);
+  digitalWrite(enableWindowMotor, LOW);
+}
